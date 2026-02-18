@@ -59,8 +59,8 @@ func init() {
 
 // AppleIAPConfig holds Apple IAP configuration
 type AppleIAPConfig struct {
-	BundleID string           // Your app's bundle ID for validation
-	Products map[string]int64 // product_id -> amount mapping
+	BundleID string          // Your app's bundle ID for validation
+	Products map[string]bool // product_id -> enabled
 }
 
 // AppleIAPService handles StoreKit 2 JWS verification
@@ -107,12 +107,12 @@ type VerifyResult struct {
 	TransactionID         string
 	OriginalTransactionID string
 	ProductID             string
-	Amount                int64
 	Environment           string
 	BundleID              string
 	AppAccountToken       string
 	PurchaseDate          int64
 	SignedDate            int64
+	ExpiresDate           int64
 	TransactionType       string
 	Quantity              int
 	Storefront            string
@@ -231,9 +231,8 @@ func (s *AppleIAPService) VerifySignedTransaction(signedTransaction string, expe
 		return nil, fmt.Errorf("%w: transaction signed more than 7 days ago", ErrTransactionExpired)
 	}
 
-	// Get amount from products config
-	amount, ok := s.config.Products[expectedProductID]
-	if !ok {
+	// Validate product exists in config
+	if _, ok := s.config.Products[expectedProductID]; !ok {
 		return nil, fmt.Errorf("%w: unknown product %s", ErrProductMismatch, expectedProductID)
 	}
 
@@ -241,12 +240,12 @@ func (s *AppleIAPService) VerifySignedTransaction(signedTransaction string, expe
 		TransactionID:         payload.TransactionID,
 		OriginalTransactionID: payload.OriginalTransactionID,
 		ProductID:             payload.ProductID,
-		Amount:                amount,
 		Environment:           payload.Environment,
 		BundleID:              payload.BundleID,
 		AppAccountToken:       payload.AppAccountToken,
 		PurchaseDate:          payload.PurchaseDate,
 		SignedDate:            payload.SignedDate,
+		ExpiresDate:           payload.ExpiresDate,
 		TransactionType:       payload.Type,
 		Quantity:              payload.Quantity,
 		Storefront:            payload.Storefront,

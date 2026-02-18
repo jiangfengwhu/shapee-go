@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"strings"
 
@@ -20,6 +21,36 @@ type VertexAIChatConfig struct {
 	ServiceAccountPrivateKey string           // Service account private key (PEM format)
 	Tools                    []ToolDefinition // 使用业务层类型
 	History                  []ChatMessage    // 使用业务层类型
+	ResponseSchema           map[string]interface{}
+}
+
+func newVertexAIClient(ctx context.Context, config VertexAIChatConfig) (*genai.Client, error) {
+	var creds *auth.Credentials
+	var err error
+
+	if config.ServiceAccountEmail != "" && config.ServiceAccountPrivateKey != "" {
+		creds, err = credentials.DetectDefault(&credentials.DetectOptions{
+			Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
+			CredentialsJSON: buildServiceAccountJSON(config.ServiceAccountEmail, config.ServiceAccountPrivateKey, config.ProjectID),
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return genai.NewClient(ctx, &genai.ClientConfig{
+		Project:     config.ProjectID,
+		Location:    config.Location,
+		Backend:     genai.BackendVertexAI,
+		Credentials: creds,
+	})
+}
+
+func vertexAIModelName(config VertexAIChatConfig) string {
+	if config.Model != "" {
+		return config.Model
+	}
+	return "gemini-2.0-flash"
 }
 
 // vertexAIChatStream 实现 ChatStream 接口，封装 Vertex AI 的流式响应
@@ -130,37 +161,13 @@ func (s *vertexAIChatStream) Err() error {
 
 // VertexAIChat 发起 Vertex AI 聊天请求，返回业务层抽象的 ChatStream
 func VertexAIChat(ctx context.Context, config VertexAIChatConfig) ChatStream {
-	// 创建 service account credentials
-	var creds *auth.Credentials
-	var err error
-
-	if config.ServiceAccountEmail != "" && config.ServiceAccountPrivateKey != "" {
-		// 使用 service account email + private key 认证
-		creds, err = credentials.DetectDefault(&credentials.DetectOptions{
-			Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
-			CredentialsJSON: buildServiceAccountJSON(config.ServiceAccountEmail, config.ServiceAccountPrivateKey, config.ProjectID),
-		})
-		if err != nil {
-			return &vertexAIChatStream{err: err, finished: true}
-		}
-	}
-
-	clientConfig := &genai.ClientConfig{
-		Project:     config.ProjectID,
-		Location:    config.Location,
-		Backend:     genai.BackendVertexAI,
-		Credentials: creds,
-	}
-
-	client, err := genai.NewClient(ctx, clientConfig)
+	client, err := newVertexAIClient(ctx, config)
 	if err != nil {
 		return &vertexAIChatStream{err: err, finished: true}
 	}
 
-	// 转换业务层消息到 Vertex AI 格式
 	contents, systemInstruction := convertToVertexAIMessages(config.History)
 
-	// 转换业务层工具定义到 Vertex AI 格式
 	var tools []*genai.Tool
 	if len(config.Tools) > 0 {
 		var funcDecls []*genai.FunctionDeclaration
@@ -174,21 +181,48 @@ func VertexAIChat(ctx context.Context, config VertexAIChatConfig) ChatStream {
 		tools = []*genai.Tool{{FunctionDeclarations: funcDecls}}
 	}
 
-	model := config.Model
-	if model == "" {
-		model = "gemini-2.0-flash"
-	}
-
 	generateConfig := &genai.GenerateContentConfig{
 		SystemInstruction: systemInstruction,
 		Tools:             tools,
 	}
 
-	// 使用 iter.Pull2 将 push-based 迭代器转换为 pull-based，实现真流式
-	seqIter := client.Models.GenerateContentStream(ctx, model, contents, generateConfig)
+	seqIter := client.Models.GenerateContentStream(ctx, vertexAIModelName(config), contents, generateConfig)
 	next, stop := iter.Pull2(seqIter)
 
 	return &vertexAIChatStream{next: next, stop: stop}
+}
+
+// VertexAIGenerateJSON 发起非流式 Vertex AI 请求，强制返回 JSON 格式
+func VertexAIGenerateJSON(ctx context.Context, config VertexAIChatConfig) (string, error) {
+	client, err := newVertexAIClient(ctx, config)
+	if err != nil {
+		return "", fmt.Errorf("vertexai generate json: %w", err)
+	}
+
+	contents, systemInstruction := convertToVertexAIMessages(config.History)
+
+	generateConfig := &genai.GenerateContentConfig{
+		SystemInstruction: systemInstruction,
+		ResponseMIMEType:  "application/json",
+	}
+	if config.ResponseSchema != nil {
+		generateConfig.ResponseSchema = convertToVertexAISchema(config.ResponseSchema)
+	}
+
+	resp, err := client.Models.GenerateContent(ctx, vertexAIModelName(config), contents, generateConfig)
+	if err != nil {
+		return "", fmt.Errorf("vertexai generate json: %w", err)
+	}
+
+	if resp != nil && len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
+		for _, part := range resp.Candidates[0].Content.Parts {
+			if part.Text != "" {
+				return part.Text, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("vertexai generate json: no text content in response")
 }
 
 // convertToVertexAIMessages 将业务层 ChatMessage 转换为 Vertex AI 消息格式
@@ -335,6 +369,13 @@ func convertToVertexAISchema(params map[string]interface{}) *genai.Schema {
 
 	if items, ok := params["items"].(map[string]any); ok {
 		schema.Items = convertToVertexAISchema(items)
+	}
+
+	if v, ok := params["minItems"].(int64); ok {
+		schema.MinItems = &v
+	}
+	if v, ok := params["maxItems"].(int64); ok {
+		schema.MaxItems = &v
 	}
 
 	if enum, ok := params["enum"].([]string); ok {

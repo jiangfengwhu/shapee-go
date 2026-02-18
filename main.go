@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"keepy-go/config"
 	"keepy-go/db"
 	"keepy-go/middleware"
 	"keepy-go/routes"
+	"keepy-go/services"
 	"log"
 	"net/http"
 
@@ -12,54 +14,60 @@ import (
 )
 
 func main() {
-	config, err := config.Load("config.json")
+	cfg, err := config.Load("config.json")
 	if err != nil {
 		log.Fatalf("failed to load config: %v", err)
 	}
-	// validate config
-	if err := config.Validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		log.Fatalf("failed to validate config: %v", err)
 	}
-	// connect to MongoDB
-	db.Connect(config.Database.URL)
+
+	db.Connect(cfg.Database.URL)
 	defer db.Close()
 
-	// Create a Gin router with default middleware (logger and recovery)
-	r := gin.Default()
-	// Public routes
-	routes.TicketRoutes(r, config)
+	// 初始化数据库索引
+	ctx := context.Background()
+	if err := db.EnsureWeightIndexes(ctx); err != nil {
+		log.Printf("warning: failed to create weight indexes: %v", err)
+	}
+	if err := db.EnsurePlanIndexes(ctx); err != nil {
+		log.Printf("warning: failed to create plan indexes: %v", err)
+	}
+	if err := db.EnsurePushTaskIndexes(ctx); err != nil {
+		log.Printf("warning: failed to create push task indexes: %v", err)
+	}
 
-	// Protected routes
+	// 初始化 APNs 服务
+	apns, err := services.NewAPNsService(cfg.APNs)
+	if err != nil {
+		log.Printf("warning: APNs service init failed: %v (push notifications disabled)", err)
+		apns, _ = services.NewAPNsService(config.APNsConfig{})
+	}
+
+	// 启动后台调度器
+	scheduler := services.NewScheduler(cfg, apns)
+	scheduler.Start()
+	defer scheduler.Stop()
+
+	r := gin.Default()
+
+	// 公开路由
+	routes.TicketRoutes(r, cfg)
+
+	// 需要认证的路由
 	protected := r.Group("/")
 	protected.Use(middleware.TicketAuth)
 	{
-		routes.ChatRoutes(protected, config)
-		routes.NoteRoutes(protected, config)
-		routes.SummaryRoutes(protected, config)
-		routes.CheckinRoutes(protected)
+		routes.UserRoutes(protected)
+		routes.WeightRoutes(protected, cfg)
+		routes.PlanRoutes(protected)
 	}
 
-	// Let's use a simpler approach: Apply middleware to specific routes individually or refactor routes functions
-	// Current routes functions: func ChatRoutes(r *gin.Engine, cfg *config.Config)
-	// They register r.POST(...) internally.
-	// To support middleware, we should change them to accept *gin.RouterGroup OR just wrap the handler.
-
-	// Refactoring routes to accept gin.IRouter interface is better, but requires changing all files.
-	// Alternative: Define routes in main.go using handlers? No, logic is in routes pkg.
-
-	// Let's modify routes/chat.go etc to accept gin.IRouter
-
-	// Define a simple GET endpoint
 	r.GET("/ping", func(c *gin.Context) {
-		// Return JSON response
-		c.JSON(http.StatusOK, gin.H{
-			"message": "pong",
-		})
+		c.JSON(http.StatusOK, gin.H{"message": "pong"})
 	})
 
-	// Start server on port 8080 (default)
-	// Server will listen on 0.0.0.0:8080 (localhost:8080 on Windows)
-	if err := r.Run(":" + config.Port); err != nil {
+	if err := r.Run(":" + cfg.Port); err != nil {
 		log.Fatalf("failed to run server: %v", err)
 	}
 }

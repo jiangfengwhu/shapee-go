@@ -19,33 +19,31 @@ type VertexAIConfig struct {
 	ServiceAccountPrivateKey string `json:"service_account_private_key"`
 }
 
-type JinaConfig struct {
-	APIKey string `json:"api_key"`
+type APNsConfig struct {
+	AuthKeyPath  string `json:"auth_key_path"`
+	AuthKey      string `json:"auth_key"`
+	KeyID        string `json:"key_id"`
+	TeamID       string `json:"team_id"`
+	BundleID     string `json:"bundle_id"`
+	IsProduction bool   `json:"is_production"`
 }
 
-type SearchAPIConfig struct {
-	APIKey string `json:"api_key"`
-}
-
-// Config 配置结构体
 type Config struct {
 	Database struct {
 		URL string `json:"url"`
 	} `json:"database"`
-	OpenAI     OpenAIConfig      `json:"openai"`
-	VertexAI   VertexAIConfig    `json:"vertex_ai"`
-	Jina       JinaConfig        `json:"jina"`
-	SearchAPI  SearchAPIConfig   `json:"searchapi"`
+	OpenAI   OpenAIConfig   `json:"openai"`
+	VertexAI VertexAIConfig `json:"vertex_ai"`
+	APNs     APNsConfig     `json:"apns"`
 	Prompts  map[string]string `json:"prompts"`
 	Port     string            `json:"port"`
 	AppleIAP struct {
-		BundleID string           `json:"bundle_id"`
-		Products map[string]int64 `json:"products"`
+		BundleID string          `json:"bundle_id"`
+		Products map[string]bool `json:"products"`
 	} `json:"apple_iap"`
 	Provider string `json:"provider"`
 }
 
-// Load 从配置文件加载配置
 func Load(filename string) (*Config, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -59,27 +57,28 @@ func Load(filename string) (*Config, error) {
 		return nil, fmt.Errorf("解析配置文件失败: %v", err)
 	}
 
-	// 对所有Prompts中的字段进行读取文件替换
 	for key, value := range config.Prompts {
 		if content, err := os.ReadFile(value); err == nil {
 			config.Prompts[key] = string(content)
 		}
 	}
 
+	// 如果 auth_key_path 指定了文件，从文件读取 APNs 密钥
+	if config.APNs.AuthKeyPath != "" && config.APNs.AuthKey == "" {
+		if content, err := os.ReadFile(config.APNs.AuthKeyPath); err == nil {
+			config.APNs.AuthKey = string(content)
+		}
+	}
+
 	return &config, nil
 }
 
-// Validate 验证配置
 func (c *Config) Validate() error {
-	// 验证数据库配置
 	if c.Database.URL == "" {
 		return fmt.Errorf("请在配置文件中设置数据库连接 URL")
 	}
-
-	// 验证OpenAI配置
-	if c.OpenAI.APIKeys == "" {
-		return fmt.Errorf("请在配置文件中设置OpenAI API密钥")
+	if c.OpenAI.APIKeys == "" && c.VertexAI.ProjectID == "" {
+		return fmt.Errorf("请在配置文件中设置至少一个 LLM 提供商")
 	}
-
 	return nil
 }

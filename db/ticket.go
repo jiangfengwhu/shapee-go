@@ -18,25 +18,60 @@ const (
 
 var (
 	ErrTicketNotFound       = errors.New("ticket not found")
-	ErrInsufficientTicket   = errors.New("insufficient ticket balance")
-	ErrInvalidAmount        = errors.New("invalid amount")
 	ErrInvalidTicketID      = errors.New("invalid ticket id")
 	ErrClientNotInitialized = errors.New("client not initialized")
+	ErrSubscriptionExpired  = errors.New("subscription expired")
+)
+
+const (
+	DefaultReminderHour   = 8
+	DefaultReminderMinute = 0
 )
 
 type Ticket struct {
-	ID        bson.ObjectID `bson:"_id"`
-	DeviceID  string        `bson:"device_id,omitempty" json:"device_id,omitempty"`
-	Balance   int64         `bson:"balance"`
-	CreatedAt time.Time     `bson:"created_at"`
-	UpdatedAt time.Time     `bson:"updated_at"`
+	ID              bson.ObjectID `bson:"_id"`
+	DeviceID        string        `bson:"device_id,omitempty" json:"device_id,omitempty"`
+	DeviceToken     string        `bson:"device_token,omitempty" json:"device_token,omitempty"`
+	CurrentWeight   float64       `bson:"current_weight,omitempty" json:"current_weight,omitempty"`
+	WeightUpdatedAt *time.Time    `bson:"weight_updated_at,omitempty" json:"weight_updated_at,omitempty"`
+	ReminderHour    int           `bson:"reminder_hour" json:"reminder_hour"`
+	ReminderMinute  int           `bson:"reminder_minute" json:"reminder_minute"`
+
+	SubscriptionProductID             string     `bson:"subscription_product_id,omitempty" json:"subscription_product_id,omitempty"`
+	SubscriptionExpiry                *time.Time `bson:"subscription_expiry,omitempty" json:"subscription_expiry,omitempty"`
+	SubscriptionOriginalTransactionID string     `bson:"subscription_original_transaction_id,omitempty" json:"subscription_original_transaction_id,omitempty"`
+
+	CreatedAt time.Time `bson:"created_at"`
+	UpdatedAt time.Time `bson:"updated_at"`
+}
+
+func (t *Ticket) IsSubscriptionActive() bool {
+	if t.SubscriptionExpiry == nil {
+		return false
+	}
+	return t.SubscriptionExpiry.After(time.Now())
+}
+
+// GetReminderHour 返回用户设置的提醒小时，未设置则返回默认值
+func (t *Ticket) GetReminderHour() int {
+	if t.ReminderHour == 0 && t.ReminderMinute == 0 {
+		return DefaultReminderHour
+	}
+	return t.ReminderHour
+}
+
+func (t *Ticket) GetReminderMinute() int {
+	if t.ReminderHour == 0 && t.ReminderMinute == 0 {
+		return DefaultReminderMinute
+	}
+	return t.ReminderMinute
 }
 
 func ticketColl() (*mongo.Collection, error) {
 	if client == nil {
 		return nil, ErrClientNotInitialized
 	}
-	db := getKeepyDatabase()
+	db := getDatabase()
 	return db.Collection(ticketCollection), nil
 }
 
@@ -61,21 +96,18 @@ func FindTicketByDeviceID(ctx context.Context, deviceID string) (*Ticket, error)
 	return &ticket, nil
 }
 
-// GenerateTicket creates a new ticket with initial bonus balance
+// GenerateTicket creates a new ticket for a device
 func GenerateTicket(ctx context.Context, deviceID string) (string, error) {
 	tickets, err := ticketColl()
 	if err != nil {
 		return "", err
 	}
 
-	const initialBonus int64 = 66 // 新账号赠送66次调用额度
-
 	now := time.Now().UTC()
 	id := bson.NewObjectID()
 	ticket := &Ticket{
 		ID:        id,
 		DeviceID:  deviceID,
-		Balance:   initialBonus,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -112,29 +144,22 @@ func GetTicket(ctx context.Context, idHex string) (*Ticket, error) {
 	return &ticket, nil
 }
 
-// RechargeTicket adds quota to a ticket
-func RechargeTicket(ctx context.Context, idHex string, amount int64) error {
-	if idHex == "" {
-		return errors.New("ticket id is required")
-	}
-	if amount <= 0 {
-		return ErrInvalidAmount
-	}
-	oid, err := bson.ObjectIDFromHex(idHex)
-	if err != nil {
-		return errors.New("invalid ticket id")
-	}
-
+// UpdateSubscription updates the subscription info for a ticket
+func UpdateSubscription(ctx context.Context, ticketID bson.ObjectID, productID string, expiry time.Time, originalTransactionID string) error {
 	tickets, err := ticketColl()
 	if err != nil {
 		return err
 	}
 
 	now := time.Now().UTC()
-	filter := bson.M{"_id": oid}
+	filter := bson.M{"_id": ticketID}
 	update := bson.M{
-		"$inc": bson.M{"balance": amount},
-		"$set": bson.M{"updated_at": now},
+		"$set": bson.M{
+			"subscription_product_id":              productID,
+			"subscription_expiry":                  expiry,
+			"subscription_original_transaction_id": originalTransactionID,
+			"updated_at":                           now,
+		},
 	}
 
 	result, err := tickets.UpdateOne(ctx, filter, update)
@@ -147,48 +172,50 @@ func RechargeTicket(ctx context.Context, idHex string, amount int64) error {
 	return nil
 }
 
-// ConsumeTicket consumes 1 quota from a ticket
-func ConsumeTicket(ctx context.Context, idHex string) error {
-	if idHex == "" {
-		return errors.New("ticket id is required")
-	}
-	oid, err := bson.ObjectIDFromHex(idHex)
-	if err != nil {
-		return errors.New("invalid ticket id")
-	}
-
+// ExpireSubscription clears the subscription for a ticket (revoke/refund)
+func ExpireSubscription(ctx context.Context, ticketID bson.ObjectID) error {
 	tickets, err := ticketColl()
 	if err != nil {
 		return err
 	}
 
-	amount := int64(1)
 	now := time.Now().UTC()
-
-	// Atomic check and update
-	filter := bson.M{
-		"_id":     oid,
-		"balance": bson.M{"$gte": amount},
-	}
+	filter := bson.M{"_id": ticketID}
 	update := bson.M{
-		"$inc": bson.M{"balance": -amount},
-		"$set": bson.M{"updated_at": now},
+		"$set": bson.M{
+			"subscription_expiry": now,
+			"updated_at":         now,
+		},
+	}
+
+	result, err := tickets.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount == 0 {
+		return ErrTicketNotFound
+	}
+	return nil
+}
+
+// FindTicketByOriginalTransactionID finds a ticket by its Apple subscription original transaction ID
+func FindTicketByOriginalTransactionID(ctx context.Context, originalTransactionID string) (*Ticket, error) {
+	tickets, err := ticketColl()
+	if err != nil {
+		return nil, err
 	}
 
 	var ticket Ticket
-	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
-	if err := tickets.FindOneAndUpdate(ctx, filter, update, opts).Decode(&ticket); err != nil {
+	err = tickets.FindOne(ctx, bson.M{
+		"subscription_original_transaction_id": originalTransactionID,
+	}).Decode(&ticket)
+	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
-			// Check if ticket exists but has insufficient balance
-			var existingTicket Ticket
-			if findErr := tickets.FindOne(ctx, bson.M{"_id": oid}).Decode(&existingTicket); findErr == nil {
-				return ErrInsufficientTicket
-			}
-			return ErrTicketNotFound
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
-	return nil
+	return &ticket, nil
 }
 
 // AppleIAPTransactionStatus represents the status of an Apple IAP transaction
@@ -208,13 +235,13 @@ type AppleIAPTransaction struct {
 	OriginalTransactionID string                    `bson:"original_transaction_id" json:"original_transaction_id"`
 	TicketID              bson.ObjectID             `bson:"ticket_id" json:"ticket_id"`
 	ProductID             string                    `bson:"product_id" json:"product_id"`
-	Amount                int64                     `bson:"amount" json:"amount"`
-	Environment           string                    `bson:"environment" json:"environment"` // "Sandbox" or "Production"
+	Environment           string                    `bson:"environment" json:"environment"`
 	BundleID              string                    `bson:"bundle_id" json:"bundle_id"`
 	AppAccountToken       string                    `bson:"app_account_token,omitempty" json:"app_account_token,omitempty"`
 	PurchaseDate          time.Time                 `bson:"purchase_date" json:"purchase_date"`
+	ExpiresDate           *time.Time                `bson:"expires_date,omitempty" json:"expires_date,omitempty"`
 	SignedDate            time.Time                 `bson:"signed_date" json:"signed_date"`
-	TransactionType       string                    `bson:"transaction_type" json:"transaction_type"` // Consumable, Non-Consumable, etc.
+	TransactionType       string                    `bson:"transaction_type" json:"transaction_type"`
 	Quantity              int                       `bson:"quantity" json:"quantity"`
 	Storefront            string                    `bson:"storefront,omitempty" json:"storefront,omitempty"`
 	StorefrontID          string                    `bson:"storefront_id,omitempty" json:"storefront_id,omitempty"`
@@ -222,7 +249,6 @@ type AppleIAPTransaction struct {
 	Currency              string                    `bson:"currency,omitempty" json:"currency,omitempty"`
 	Status                AppleIAPTransactionStatus `bson:"status" json:"status"`
 	ErrorMessage          string                    `bson:"error_message,omitempty" json:"error_message,omitempty"`
-	RechargeTransactionID bson.ObjectID             `bson:"recharge_transaction_id,omitempty" json:"recharge_transaction_id,omitempty"`
 	CreatedAt             time.Time                 `bson:"created_at" json:"created_at"`
 	UpdatedAt             time.Time                 `bson:"updated_at" json:"updated_at"`
 }
@@ -233,11 +259,11 @@ type AppleIAPTransactionInput struct {
 	OriginalTransactionID string
 	TicketID              bson.ObjectID
 	ProductID             string
-	Amount                int64
 	Environment           string
 	BundleID              string
 	AppAccountToken       string
 	PurchaseDate          int64 // Unix milliseconds
+	ExpiresDate           int64 // Unix milliseconds (0 if no expiry)
 	SignedDate            int64 // Unix milliseconds
 	TransactionType       string
 	Quantity              int
@@ -253,7 +279,7 @@ func CheckAppleTransactionExists(ctx context.Context, transactionID string) (boo
 		return false, nil, ErrClientNotInitialized
 	}
 
-	db := getKeepyDatabase()
+	db := getDatabase()
 	coll := db.Collection(appleIAPTransactionCollection)
 
 	var tx AppleIAPTransaction
@@ -274,7 +300,7 @@ func CreateAppleTransaction(ctx context.Context, input *AppleIAPTransactionInput
 		return nil, ErrClientNotInitialized
 	}
 
-	db := getKeepyDatabase()
+	db := getDatabase()
 	coll := db.Collection(appleIAPTransactionCollection)
 
 	now := time.Now().UTC()
@@ -283,7 +309,6 @@ func CreateAppleTransaction(ctx context.Context, input *AppleIAPTransactionInput
 		OriginalTransactionID: input.OriginalTransactionID,
 		TicketID:              input.TicketID,
 		ProductID:             input.ProductID,
-		Amount:                input.Amount,
 		Environment:           input.Environment,
 		BundleID:              input.BundleID,
 		AppAccountToken:       input.AppAccountToken,
@@ -299,6 +324,10 @@ func CreateAppleTransaction(ctx context.Context, input *AppleIAPTransactionInput
 		CreatedAt:             now,
 		UpdatedAt:             now,
 	}
+	if input.ExpiresDate > 0 {
+		exp := time.UnixMilli(input.ExpiresDate)
+		tx.ExpiresDate = &exp
+	}
 
 	_, err := coll.InsertOne(ctx, tx)
 	if err != nil {
@@ -312,12 +341,12 @@ func CreateAppleTransaction(ctx context.Context, input *AppleIAPTransactionInput
 }
 
 // UpdateAppleTransactionStatus updates the status of an Apple transaction
-func UpdateAppleTransactionStatus(ctx context.Context, transactionID string, status AppleIAPTransactionStatus, errorMsg string, rechargeTransactionID bson.ObjectID) error {
+func UpdateAppleTransactionStatus(ctx context.Context, transactionID string, status AppleIAPTransactionStatus, errorMsg string) error {
 	if client == nil {
 		return ErrClientNotInitialized
 	}
 
-	db := getKeepyDatabase()
+	db := getDatabase()
 	coll := db.Collection(appleIAPTransactionCollection)
 
 	update := bson.M{
@@ -331,10 +360,6 @@ func UpdateAppleTransactionStatus(ctx context.Context, transactionID string, sta
 		update["$set"].(bson.M)["error_message"] = errorMsg
 	}
 
-	if !rechargeTransactionID.IsZero() {
-		update["$set"].(bson.M)["recharge_transaction_id"] = rechargeTransactionID
-	}
-
 	_, err := coll.UpdateByID(ctx, transactionID, update)
 	return err
 }
@@ -346,7 +371,7 @@ func FindAppleTransactionsByOriginalID(ctx context.Context, originalTransactionI
 		return nil, ErrClientNotInitialized
 	}
 
-	db := getKeepyDatabase()
+	db := getDatabase()
 	coll := db.Collection(appleIAPTransactionCollection)
 
 	cursor, err := coll.Find(ctx, bson.M{"original_transaction_id": originalTransactionID})
@@ -368,7 +393,7 @@ func FindPendingAppleTransactions(ctx context.Context) ([]*AppleIAPTransaction, 
 		return nil, ErrClientNotInitialized
 	}
 
-	db := getKeepyDatabase()
+	db := getDatabase()
 	coll := db.Collection(appleIAPTransactionCollection)
 
 	cursor, err := coll.Find(ctx, bson.M{"status": AppleIAPStatusPending})
@@ -384,34 +409,6 @@ func FindPendingAppleTransactions(ctx context.Context) ([]*AppleIAPTransaction, 
 	return transactions, nil
 }
 
-// DeductTicketBalance deducts balance from a ticket (for refunds)
-// This function allows the balance to go negative
-func DeductTicketBalance(ctx context.Context, ticketID bson.ObjectID, amount int64) error {
-	if amount <= 0 {
-		return ErrInvalidAmount
-	}
-
-	tickets, err := ticketColl()
-	if err != nil {
-		return err
-	}
-
-	now := time.Now().UTC()
-	filter := bson.M{"_id": ticketID}
-	update := bson.M{
-		"$inc": bson.M{"balance": -amount},
-		"$set": bson.M{"updated_at": now},
-	}
-
-	result, err := tickets.UpdateOne(ctx, filter, update)
-	if err != nil {
-		return err
-	}
-	if result.MatchedCount == 0 {
-		return ErrTicketNotFound
-	}
-	return nil
-}
 
 // MarkTransactionRefunded marks an Apple IAP transaction as refunded
 func MarkTransactionRefunded(ctx context.Context, transactionID string) error {
@@ -419,7 +416,7 @@ func MarkTransactionRefunded(ctx context.Context, transactionID string) error {
 		return ErrClientNotInitialized
 	}
 
-	db := getKeepyDatabase()
+	db := getDatabase()
 	coll := db.Collection(appleIAPTransactionCollection)
 
 	update := bson.M{
@@ -431,4 +428,110 @@ func MarkTransactionRefunded(ctx context.Context, transactionID string) error {
 
 	_, err := coll.UpdateByID(ctx, transactionID, update)
 	return err
+}
+
+// --- Ticket 扩展: 设备推送 & 体重 ---
+
+func UpdateTicketDeviceToken(ctx context.Context, idHex, deviceToken string) error {
+	oid, err := bson.ObjectIDFromHex(idHex)
+	if err != nil {
+		return ErrInvalidTicketID
+	}
+
+	coll, err := ticketColl()
+	if err != nil {
+		return err
+	}
+
+	result, err := coll.UpdateByID(ctx, oid, bson.M{
+		"$set": bson.M{"device_token": deviceToken, "updated_at": time.Now().UTC()},
+	})
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount == 0 {
+		return ErrTicketNotFound
+	}
+	return nil
+}
+
+func UpdateTicketWeight(ctx context.Context, idHex string, weight float64) (*Ticket, error) {
+	oid, err := bson.ObjectIDFromHex(idHex)
+	if err != nil {
+		return nil, ErrInvalidTicketID
+	}
+
+	coll, err := ticketColl()
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	var ticket Ticket
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+	err = coll.FindOneAndUpdate(ctx,
+		bson.M{"_id": oid},
+		bson.M{"$set": bson.M{
+			"current_weight":    weight,
+			"weight_updated_at": now,
+			"updated_at":        now,
+		}},
+		opts,
+	).Decode(&ticket)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrTicketNotFound
+		}
+		return nil, err
+	}
+	return &ticket, nil
+}
+
+// GetAllTicketsWithDeviceToken 获取所有注册了推送 token 的 ticket
+func GetAllTicketsWithDeviceToken(ctx context.Context) ([]*Ticket, error) {
+	coll, err := ticketColl()
+	if err != nil {
+		return nil, err
+	}
+
+	cursor, err := coll.Find(ctx, bson.M{
+		"device_token": bson.M{"$exists": true, "$ne": ""},
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var tickets []*Ticket
+	if err := cursor.All(ctx, &tickets); err != nil {
+		return nil, err
+	}
+	return tickets, nil
+}
+
+func UpdateTicketReminderTime(ctx context.Context, idHex string, hour, minute int) error {
+	oid, err := bson.ObjectIDFromHex(idHex)
+	if err != nil {
+		return ErrInvalidTicketID
+	}
+
+	coll, err := ticketColl()
+	if err != nil {
+		return err
+	}
+
+	result, err := coll.UpdateByID(ctx, oid, bson.M{
+		"$set": bson.M{
+			"reminder_hour":   hour,
+			"reminder_minute": minute,
+			"updated_at":      time.Now().UTC(),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount == 0 {
+		return ErrTicketNotFound
+	}
+	return nil
 }

@@ -27,6 +27,6 @@ func Close() {
 	log.Println("disconnected from MongoDB")
 }
 
-func getKeepyDatabase() *mongo.Database {
-	return client.Database("keepy")
+func getDatabase() *mongo.Database {
+	return client.Database("shapee")
 }

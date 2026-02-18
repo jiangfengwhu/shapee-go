@@ -2,19 +2,30 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/azure"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/packages/ssestream"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 type OpenAIChatConfig struct {
-	APIKey  string
-	BaseURL string
-	Tools   []ToolDefinition // 使用业务层类型
-	History []ChatMessage    // 使用业务层类型
+	APIKey         string
+	BaseURL        string
+	Tools          []ToolDefinition       // 使用业务层类型
+	History        []ChatMessage          // 使用业务层类型
+	ResponseSchema map[string]interface{} // JSON Schema，用于 structured output
+}
+
+func newOpenAIClient(config OpenAIChatConfig) openai.Client {
+	return openai.NewClient(
+		azure.WithEndpoint(config.BaseURL, "2024-10-01-preview"),
+		azure.WithAPIKey(config.APIKey),
+	)
 }
 
 // openaiChatStream 实现 ChatStream 接口，封装 OpenAI 的 SSE stream
@@ -111,12 +122,7 @@ func (s *openaiChatStream) Err() error {
 
 // OpenAIChat 发起 OpenAI 聊天请求，返回业务层抽象的 ChatStream
 func OpenAIChat(ctx context.Context, config OpenAIChatConfig) ChatStream {
-	client := openai.NewClient(
-		azure.WithEndpoint(config.BaseURL, "2024-10-01-preview"),
-		azure.WithAPIKey(config.APIKey),
-	)
-
-	// 转换业务层消息到 OpenAI 格式
+	client := newOpenAIClient(config)
 	messages := convertToOpenAIMessages(config.History)
 
 	// 转换业务层工具定义到 OpenAI 格式
@@ -137,6 +143,39 @@ func OpenAIChat(ctx context.Context, config OpenAIChatConfig) ChatStream {
 
 	stream := client.Chat.Completions.NewStreaming(ctx, params)
 	return &openaiChatStream{stream: stream}
+}
+
+// OpenAIGenerateJSON 发起非流式 OpenAI 请求，强制返回 JSON 格式。
+// 使用 json_object 模式；如果传入了 ResponseSchema，会将其作为 system message 注入以约束输出结构。
+func OpenAIGenerateJSON(ctx context.Context, config OpenAIChatConfig) (string, error) {
+	client := newOpenAIClient(config)
+	messages := convertToOpenAIMessages(config.History)
+
+	if config.ResponseSchema != nil {
+		schemaJSON, _ := json.Marshal(config.ResponseSchema)
+		schemaMsg := openai.SystemMessage("请严格按以下 JSON Schema 格式返回数据：\n" + string(schemaJSON))
+		messages = append([]openai.ChatCompletionMessageParamUnion{schemaMsg}, messages...)
+	}
+
+	jsonFormat := shared.NewResponseFormatJSONObjectParam()
+	params := openai.ChatCompletionNewParams{
+		Messages: messages,
+		Model:    "xiaolvgongcheng-forepart-openai-eastus2-gpt-5-chat",
+		ResponseFormat: openai.ChatCompletionNewParamsResponseFormatUnion{
+			OfJSONObject: &jsonFormat,
+		},
+	}
+
+	completion, err := client.Chat.Completions.New(ctx, params)
+	if err != nil {
+		return "", fmt.Errorf("openai generate json: %w", err)
+	}
+
+	if len(completion.Choices) == 0 {
+		return "", fmt.Errorf("openai generate json: no choices in response")
+	}
+
+	return completion.Choices[0].Message.Content, nil
 }
 
 // convertToOpenAIMessages 将业务层 ChatMessage 转换为 OpenAI 消息格式
