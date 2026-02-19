@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
-	"keepy-go/config"
-	"keepy-go/db"
-	"keepy-go/middleware"
-	"keepy-go/routes"
-	"keepy-go/services"
 	"log"
 	"net/http"
+	"shapee-go/config"
+	"shapee-go/db"
+	"shapee-go/middleware"
+	"shapee-go/routes"
+	"shapee-go/services"
 
 	"github.com/gin-gonic/gin"
 )
@@ -27,9 +27,6 @@ func main() {
 
 	// 初始化数据库索引
 	ctx := context.Background()
-	if err := db.EnsureWeightIndexes(ctx); err != nil {
-		log.Printf("warning: failed to create weight indexes: %v", err)
-	}
 	if err := db.EnsurePlanIndexes(ctx); err != nil {
 		log.Printf("warning: failed to create plan indexes: %v", err)
 	}
@@ -58,7 +55,7 @@ func main() {
 	protected := r.Group("/")
 	protected.Use(middleware.TicketAuth)
 	{
-		routes.UserRoutes(protected)
+		routes.TicketProfileRoutes(protected)
 		routes.WeightRoutes(protected, cfg)
 		routes.PlanRoutes(protected)
 	}

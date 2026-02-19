@@ -2,9 +2,9 @@ package services
 
 import (
 	"context"
-	"keepy-go/config"
-	"keepy-go/db"
 	"log"
+	"shapee-go/config"
+	"shapee-go/db"
 	"time"
 )
 

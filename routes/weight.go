@@ -1,11 +1,13 @@
 package routes
 
 import (
-	"keepy-go/config"
-	"keepy-go/db"
-	"keepy-go/services"
+	"context"
 	"net/http"
+	"shapee-go/config"
+	"shapee-go/db"
+	"shapee-go/services"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -24,21 +26,31 @@ func WeightRoutes(r gin.IRouter, cfg *config.Config) {
 
 		record, err := db.AddWeightRecord(c.Request.Context(), ticketID, req.Weight)
 		if err != nil {
+			if err == db.ErrWeightUpdateLimitReached {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "一天最多只能更新一次体重"})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
-		ticket, err := db.UpdateTicketWeight(c.Request.Context(), ticketID, req.Weight)
+		// AddWeightRecord 已经更新了 ticket 的 current_weight，这里只需要获取最新的 ticket 信息
+		ticket, err := db.GetTicket(c.Request.Context(), ticketID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
-		go services.GenerateDailyPlan(c.Request.Context(), cfg, ticketID, req.Weight)
+		// 使用独立的 context，避免请求完成后 context 被取消
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			services.GenerateDailyPlan(ctx, cfg, ticketID, req.Weight)
+		}()
 
 		c.JSON(http.StatusOK, gin.H{
 			"weight_record": record,
-			"user":          ticket,
+			"ticket":        ticket,
 			"message":       "体重已更新，正在为你生成今日饮食和锻炼计划...",
 		})
 	})

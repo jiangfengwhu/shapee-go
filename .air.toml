@@ -4,8 +4,8 @@ tmp_dir = "tmp"
 
 [build]
   args_bin = []
-  bin = "./keepy-go"
-  cmd = "go build -o ./keepy-go ."
+  bin = "./shapee-go"
+  cmd = "go build -o ./shapee-go ."
   delay = 1000
   exclude_dir = ["assets", "tmp", "vendor", "testdata"]
   exclude_file = []

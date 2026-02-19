@@ -8,7 +8,6 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 const (
@@ -17,10 +16,11 @@ const (
 )
 
 var (
-	ErrTicketNotFound       = errors.New("ticket not found")
-	ErrInvalidTicketID      = errors.New("invalid ticket id")
-	ErrClientNotInitialized = errors.New("client not initialized")
-	ErrSubscriptionExpired  = errors.New("subscription expired")
+	ErrTicketNotFound          = errors.New("ticket not found")
+	ErrInvalidTicketID         = errors.New("invalid ticket id")
+	ErrClientNotInitialized    = errors.New("client not initialized")
+	ErrSubscriptionExpired     = errors.New("subscription expired")
+	ErrWeightUpdateLimitReached = errors.New("一天最多只能更新一次体重")
 )
 
 const (
@@ -28,14 +28,27 @@ const (
 	DefaultReminderMinute = 0
 )
 
+type WeightRecord struct {
+	Weight    float64   `bson:"weight" json:"weight"`
+	Date      string    `bson:"date" json:"date"`
+	CreatedAt time.Time `bson:"created_at" json:"created_at"`
+}
+
 type Ticket struct {
 	ID              bson.ObjectID `bson:"_id"`
 	DeviceID        string        `bson:"device_id,omitempty" json:"device_id,omitempty"`
 	DeviceToken     string        `bson:"device_token,omitempty" json:"device_token,omitempty"`
 	CurrentWeight   float64       `bson:"current_weight,omitempty" json:"current_weight,omitempty"`
+	TargetWeight    float64       `bson:"target_weight,omitempty" json:"target_weight,omitempty"` // 目标体重
 	WeightUpdatedAt *time.Time    `bson:"weight_updated_at,omitempty" json:"weight_updated_at,omitempty"`
+	WeightHistory   []WeightRecord `bson:"weight_history,omitempty" json:"weight_history,omitempty"`
 	ReminderHour    int           `bson:"reminder_hour" json:"reminder_hour"`
 	ReminderMinute  int           `bson:"reminder_minute" json:"reminder_minute"`
+
+	// 用户profile信息
+	BasicInfo                      string `bson:"basic_info,omitempty" json:"basic_info,omitempty"`                                           // 基础信息
+	DietaryAndExercisePreferences  string `bson:"dietary_and_exercise_preferences,omitempty" json:"dietary_and_exercise_preferences,omitempty"` // 饮食及运动喜好
+	HealthIssues                   string `bson:"health_issues,omitempty" json:"health_issues,omitempty"`                                       // 健康问题
 
 	SubscriptionProductID             string     `bson:"subscription_product_id,omitempty" json:"subscription_product_id,omitempty"`
 	SubscriptionExpiry                *time.Time `bson:"subscription_expiry,omitempty" json:"subscription_expiry,omitempty"`
@@ -456,35 +469,12 @@ func UpdateTicketDeviceToken(ctx context.Context, idHex, deviceToken string) err
 }
 
 func UpdateTicketWeight(ctx context.Context, idHex string, weight float64) (*Ticket, error) {
-	oid, err := bson.ObjectIDFromHex(idHex)
-	if err != nil {
-		return nil, ErrInvalidTicketID
-	}
-
-	coll, err := ticketColl()
+	// UpdateTicketWeight now uses AddWeightRecord which handles both weight_history and current_weight
+	_, err := AddWeightRecord(ctx, idHex, weight)
 	if err != nil {
 		return nil, err
 	}
-
-	now := time.Now().UTC()
-	var ticket Ticket
-	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
-	err = coll.FindOneAndUpdate(ctx,
-		bson.M{"_id": oid},
-		bson.M{"$set": bson.M{
-			"current_weight":    weight,
-			"weight_updated_at": now,
-			"updated_at":        now,
-		}},
-		opts,
-	).Decode(&ticket)
-	if err != nil {
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return nil, ErrTicketNotFound
-		}
-		return nil, err
-	}
-	return &ticket, nil
+	return GetTicket(ctx, idHex)
 }
 
 // GetAllTicketsWithDeviceToken 获取所有注册了推送 token 的 ticket
@@ -534,4 +524,187 @@ func UpdateTicketReminderTime(ctx context.Context, idHex string, hour, minute in
 		return ErrTicketNotFound
 	}
 	return nil
+}
+
+// UpdateTicketProfile updates user profile information
+func UpdateTicketProfile(ctx context.Context, idHex string, basicInfo, dietaryAndExercisePreferences, healthIssues *string, targetWeight *float64) error {
+	oid, err := bson.ObjectIDFromHex(idHex)
+	if err != nil {
+		return ErrInvalidTicketID
+	}
+
+	coll, err := ticketColl()
+	if err != nil {
+		return err
+	}
+
+	updateFields := bson.M{
+		"updated_at": time.Now().UTC(),
+	}
+
+	if basicInfo != nil {
+		updateFields["basic_info"] = *basicInfo
+	}
+	if dietaryAndExercisePreferences != nil {
+		updateFields["dietary_and_exercise_preferences"] = *dietaryAndExercisePreferences
+	}
+	if healthIssues != nil {
+		updateFields["health_issues"] = *healthIssues
+	}
+	if targetWeight != nil {
+		updateFields["target_weight"] = *targetWeight
+	}
+
+	result, err := coll.UpdateByID(ctx, oid, bson.M{
+		"$set": updateFields,
+	})
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount == 0 {
+		return ErrTicketNotFound
+	}
+	return nil
+}
+
+// --- Weight History (stored in Ticket) ---
+
+// AddWeightRecord adds a weight record to the ticket's weight_history array
+// 限制：一天最多只能更新一次体重
+func AddWeightRecord(ctx context.Context, ticketIDHex string, weight float64) (*WeightRecord, error) {
+	oid, err := bson.ObjectIDFromHex(ticketIDHex)
+	if err != nil {
+		return nil, ErrInvalidTicketID
+	}
+
+	coll, err := ticketColl()
+	if err != nil {
+		return nil, err
+	}
+
+	// 先获取ticket，检查今天是否已经更新过
+	var ticket Ticket
+	err = coll.FindOne(ctx, bson.M{"_id": oid}).Decode(&ticket)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrTicketNotFound
+		}
+		return nil, err
+	}
+
+	today := getTodayDateString()
+	now := time.Now().UTC()
+
+	// 检查今天是否已经更新过体重（通过 WeightUpdatedAt 判断）
+	if ticket.WeightUpdatedAt != nil {
+		loc, _ := time.LoadLocation("Asia/Shanghai")
+		updatedDate := ticket.WeightUpdatedAt.In(loc).Format("2006-01-02")
+		if updatedDate == today {
+			return nil, ErrWeightUpdateLimitReached
+		}
+	}
+
+	record := WeightRecord{
+		Weight:    weight,
+		Date:      today,
+		CreatedAt: now,
+	}
+
+	// 更新体重和更新时间
+	updateFields := bson.M{
+		"current_weight":    weight,
+		"weight_updated_at": now,
+		"updated_at":        now,
+	}
+
+	// 添加新记录（插入到数组开头，最新的在前面）并更新计数
+	result, err := coll.UpdateOne(ctx,
+		bson.M{"_id": oid},
+		bson.M{
+			"$push": bson.M{
+				"weight_history": bson.M{
+					"$each":     []WeightRecord{record},
+					"$position": 0, // 插入到数组开头
+				},
+			},
+			"$set": updateFields,
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	if result.MatchedCount == 0 {
+		return nil, ErrTicketNotFound
+	}
+
+	return &record, nil
+}
+
+// GetWeightHistory retrieves weight history from ticket's weight_history array
+func GetWeightHistory(ctx context.Context, ticketIDHex string, limit int) ([]*WeightRecord, error) {
+	oid, err := bson.ObjectIDFromHex(ticketIDHex)
+	if err != nil {
+		return nil, ErrInvalidTicketID
+	}
+
+	coll, err := ticketColl()
+	if err != nil {
+		return nil, err
+	}
+
+	var ticket Ticket
+	err = coll.FindOne(ctx, bson.M{"_id": oid}).Decode(&ticket)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrTicketNotFound
+		}
+		return nil, err
+	}
+
+	// 限制返回数量
+	history := ticket.WeightHistory
+	if len(history) > limit {
+		history = history[:limit]
+	}
+
+	// 转换为指针数组
+	result := make([]*WeightRecord, len(history))
+	for i := range history {
+		result[i] = &history[i]
+	}
+
+	return result, nil
+}
+
+// HasWeightRecordToday checks if there's a weight record for today in the ticket
+// 通过 WeightUpdatedAt 字段判断今天是否已更新体重
+func HasWeightRecordToday(ctx context.Context, ticketIDHex string) (bool, error) {
+	oid, err := bson.ObjectIDFromHex(ticketIDHex)
+	if err != nil {
+		return false, ErrInvalidTicketID
+	}
+
+	coll, err := ticketColl()
+	if err != nil {
+		return false, err
+	}
+
+	var ticket Ticket
+	err = coll.FindOne(ctx, bson.M{"_id": oid}).Decode(&ticket)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return false, ErrTicketNotFound
+		}
+		return false, err
+	}
+
+	// 通过 WeightUpdatedAt 判断今天是否已更新
+	if ticket.WeightUpdatedAt != nil {
+		loc, _ := time.LoadLocation("Asia/Shanghai")
+		updatedDate := ticket.WeightUpdatedAt.In(loc).Format("2006-01-02")
+		today := getTodayDateString()
+		return updatedDate == today, nil
+	}
+
+	return false, nil
 }

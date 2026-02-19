@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"keepy-go/config"
-	"keepy-go/llm"
+	"shapee-go/config"
+	"shapee-go/llm"
 	"testing"
 	"time"
 )

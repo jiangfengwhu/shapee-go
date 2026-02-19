@@ -2,7 +2,7 @@ package llm
 
 import (
 	"context"
-	"keepy-go/config"
+	"shapee-go/config"
 )
 
 const (

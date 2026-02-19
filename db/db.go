@@ -2,6 +2,7 @@ package db
 
 import (
 	"log"
+	"time"
 
 	"context"
 
@@ -29,4 +30,13 @@ func Close() {
 
 func getDatabase() *mongo.Database {
 	return client.Database("shapee")
+}
+
+func getTodayDateString() string {
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	return time.Now().In(loc).Format("2006-01-02")
+}
+
+func GetTodayDateString() string {
+	return getTodayDateString()
 }

@@ -1,8 +1,8 @@
 package routes
 
 import (
-	"keepy-go/db"
 	"net/http"
+	"shapee-go/db"
 
 	"github.com/gin-gonic/gin"
 )
@@ -21,10 +21,10 @@ func PlanRoutes(r gin.IRouter) {
 		if plan == nil {
 			hasWeight, _ := db.HasWeightRecordToday(c.Request.Context(), ticketID)
 			c.JSON(http.StatusOK, gin.H{
-				"plan":              nil,
-				"status":            "no_plan",
-				"weight_updated":    hasWeight,
-				"message":           "今日尚未生成计划，请先更新体重",
+				"plan":           nil,
+				"status":         "no_plan",
+				"weight_updated": hasWeight,
+				"message":        "今日尚未生成计划，请先更新体重",
 			})
 			return
 		}

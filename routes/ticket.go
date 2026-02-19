@@ -1,12 +1,12 @@
 package routes
 
 import (
-	"keepy-go/config"
-	"keepy-go/db"
-	"keepy-go/services"
-	"keepy-go/util"
 	"log"
 	"net/http"
+	"shapee-go/config"
+	"shapee-go/db"
+	"shapee-go/services"
+	"shapee-go/util"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -287,5 +287,173 @@ func TicketRoutes(r gin.IRouter, cfg *config.Config) {
 		default:
 			c.JSON(http.StatusOK, gin.H{"status": "acknowledged"})
 		}
+	})
+}
+
+// TicketProfileRoutes handles authenticated ticket/profile routes
+func TicketProfileRoutes(r gin.IRouter) {
+	// Device token registration
+	r.POST("/ticket/device-token", func(c *gin.Context) {
+		var req struct {
+			DeviceToken string `json:"device_token" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		ticketID := c.GetString("ticket_id")
+		if err := db.UpdateTicketDeviceToken(c.Request.Context(), ticketID, req.DeviceToken); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"message": "设备推送token已注册"})
+	})
+
+	// Reminder time update
+	r.POST("/ticket/reminder-time", func(c *gin.Context) {
+		var req struct {
+			Hour   int `json:"hour" binding:"min=0,max=23"`
+			Minute int `json:"minute" binding:"min=0,max=59"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请输入有效时间（hour: 0-23, minute: 0-59）"})
+			return
+		}
+
+		ticketID := c.GetString("ticket_id")
+		if err := db.UpdateTicketReminderTime(c.Request.Context(), ticketID, req.Hour, req.Minute); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":         "提醒时间已更新",
+			"reminder_hour":   req.Hour,
+			"reminder_minute": req.Minute,
+		})
+	})
+
+	// Get ticket profile
+	r.GET("/ticket/profile", func(c *gin.Context) {
+		ticketID := c.GetString("ticket_id")
+
+		ticket, err := db.GetTicket(c.Request.Context(), ticketID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"ticket": ticket})
+	})
+
+	// Get user profile (includes weight history, reminder time, etc.)
+	r.GET("/user/profile", func(c *gin.Context) {
+		ticketID := c.GetString("ticket_id")
+
+		ticket, err := db.GetTicket(c.Request.Context(), ticketID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		// 获取体重历史记录（最近30条）
+		weightHistory, _ := db.GetWeightHistory(c.Request.Context(), ticketID, 30)
+
+		c.JSON(http.StatusOK, gin.H{
+			"current_weight":        ticket.CurrentWeight,
+			"target_weight":          ticket.TargetWeight,
+			"weight_updated_at":      ticket.WeightUpdatedAt,
+			"weight_history":         weightHistory,
+			"reminder_hour":          ticket.ReminderHour,
+			"reminder_minute":        ticket.ReminderMinute,
+			"basic_info":             ticket.BasicInfo,
+			"dietary_and_exercise_preferences": ticket.DietaryAndExercisePreferences,
+			"health_issues":          ticket.HealthIssues,
+		})
+	})
+
+	// Update user profile
+	r.POST("/user/profile", func(c *gin.Context) {
+		var req struct {
+			BasicInfo                     *string  `json:"basic_info,omitempty"`
+			DietaryAndExercisePreferences *string  `json:"dietary_and_exercise_preferences,omitempty"`
+			HealthIssues                  *string  `json:"health_issues,omitempty"`
+			TargetWeight                  *float64 `json:"target_weight,omitempty"`
+			ReminderHour                  *int     `json:"reminder_hour,omitempty"`
+			ReminderMinute                *int     `json:"reminder_minute,omitempty"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		ticketID := c.GetString("ticket_id")
+
+		// 更新profile信息
+		if req.BasicInfo != nil || req.DietaryAndExercisePreferences != nil || req.HealthIssues != nil || req.TargetWeight != nil {
+			if err := db.UpdateTicketProfile(c.Request.Context(), ticketID, req.BasicInfo, req.DietaryAndExercisePreferences, req.HealthIssues, req.TargetWeight); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+		}
+
+		// 更新提醒时间
+		if req.ReminderHour != nil || req.ReminderMinute != nil {
+			hour := 0
+			minute := 0
+			if req.ReminderHour != nil {
+				hour = *req.ReminderHour
+				if hour < 0 || hour > 23 {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "reminder_hour 必须在 0-23 之间"})
+					return
+				}
+			}
+			if req.ReminderMinute != nil {
+				minute = *req.ReminderMinute
+				if minute < 0 || minute > 59 {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "reminder_minute 必须在 0-59 之间"})
+					return
+				}
+			}
+
+			// 如果只提供了一个值，需要先获取当前值
+			if req.ReminderHour == nil || req.ReminderMinute == nil {
+				ticket, err := db.GetTicket(c.Request.Context(), ticketID)
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+					return
+				}
+				if req.ReminderHour == nil {
+					hour = ticket.ReminderHour
+				}
+				if req.ReminderMinute == nil {
+					minute = ticket.ReminderMinute
+				}
+			}
+
+			if err := db.UpdateTicketReminderTime(c.Request.Context(), ticketID, hour, minute); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+		}
+
+		// 返回更新后的ticket信息
+		ticket, err := db.GetTicket(c.Request.Context(), ticketID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":                         "用户信息已更新",
+			"basic_info":                      ticket.BasicInfo,
+			"dietary_and_exercise_preferences": ticket.DietaryAndExercisePreferences,
+			"health_issues":                   ticket.HealthIssues,
+			"target_weight":                   ticket.TargetWeight,
+			"reminder_hour":                   ticket.ReminderHour,
+			"reminder_minute":                 ticket.ReminderMinute,
+		})
 	})
 }

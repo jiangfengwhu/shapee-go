@@ -10,7 +10,7 @@ import (
 )
 
 // TODO: Move to config
-var encryptionKey = []byte("keepy-go-secret-key-32bytes-long") // Must be 32 bytes for AES-256
+var encryptionKey = []byte("shapee-go-secret-key-32bytes-lon") // Must be 32 bytes for AES-256
 
 func EncryptTicketID(plaintext string) (string, error) {
 	block, err := aes.NewCipher(encryptionKey)

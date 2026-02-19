@@ -1,8 +1,8 @@
 package middleware
 
 import (
-	"keepy-go/util"
 	"net/http"
+	"shapee-go/util"
 
 	"github.com/gin-gonic/gin"
 )

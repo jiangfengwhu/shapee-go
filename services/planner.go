@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"keepy-go/config"
-	"keepy-go/db"
-	"keepy-go/llm"
 	"log"
+	"shapee-go/config"
+	"shapee-go/db"
+	"shapee-go/llm"
 	"strings"
 	"time"
 
@@ -37,7 +37,7 @@ var planResponseSchema = map[string]interface{}{
 			"items": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"type": map[string]interface{}{"type": "string", "enum": []string{"breakfast", "lunch", "dinner"}},
+					"type":           map[string]interface{}{"type": "string", "enum": []string{"breakfast", "lunch", "dinner"}},
 					"time":           map[string]interface{}{"type": "string", "description": "用餐时间，格式 HH:MM"},
 					"title":          map[string]interface{}{"type": "string", "description": "餐名"},
 					"total_calories": map[string]interface{}{"type": "integer", "description": "总热量(卡)"},
