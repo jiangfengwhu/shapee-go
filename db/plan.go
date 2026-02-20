@@ -51,9 +51,11 @@ type Exercise struct {
 }
 
 type DailySummary struct {
-	TargetCaloriesIntake int    `bson:"target_calories_intake" json:"target_calories_intake"`
+	TargetCaloriesIntake  int    `bson:"target_calories_intake" json:"target_calories_intake"`
 	TargetCaloriesBurn   int    `bson:"target_calories_burn" json:"target_calories_burn"`
 	WaterIntakeML        int    `bson:"water_intake_ml" json:"water_intake_ml"`
+	TargetSteps          int    `bson:"target_steps" json:"target_steps"`           // 建议每日步数
+	EstimatedWeeksToGoal int    `bson:"estimated_weeks_to_goal" json:"estimated_weeks_to_goal"` // 预计多少周可达目标体重，未设目标时为 0
 	Tips                 string `bson:"tips" json:"tips"`
 }
 
@@ -150,6 +152,46 @@ func GetTodayPlan(ctx context.Context, ticketIDHex string) (*DailyPlan, error) {
 	return &plan, nil
 }
 
+// GetRecentPlans 获取过去 N 天的计划（不含今天），按日期倒序（昨天在前）
+func GetRecentPlans(ctx context.Context, ticketIDHex string, days int) ([]*DailyPlan, error) {
+	oid, err := bson.ObjectIDFromHex(ticketIDHex)
+	if err != nil {
+		return nil, ErrInvalidTicketID
+	}
+	if days <= 0 {
+		return nil, nil
+	}
+
+	coll, err := planColl()
+	if err != nil {
+		return nil, err
+	}
+
+	loc, _ := time.LoadLocation("Asia/Shanghai")
+	now := time.Now().In(loc)
+	var dates []string
+	for i := 1; i <= days; i++ {
+		d := now.AddDate(0, 0, -i).Format("2006-01-02")
+		dates = append(dates, d)
+	}
+
+	cursor, err := coll.Find(ctx, bson.M{
+		"ticket_id": oid,
+		"date":      bson.M{"$in": dates},
+		"status":    PlanStatusReady,
+	}, options.Find().SetSort(bson.D{{Key: "date", Value: -1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var plans []*DailyPlan
+	if err := cursor.All(ctx, &plans); err != nil {
+		return nil, err
+	}
+	return plans, nil
+}
+
 func UpdatePlanStatus(ctx context.Context, planID bson.ObjectID, status PlanStatus, errorMsg string) error {
 	coll, err := planColl()
 	if err != nil {
@@ -170,21 +212,25 @@ func UpdatePlanStatus(ctx context.Context, planID bson.ObjectID, status PlanStat
 	return err
 }
 
-func UpdatePlanContent(ctx context.Context, planID bson.ObjectID, meals []Meal, exercises []Exercise, summary *DailySummary) error {
+// UpdatePlanContent 更新计划内容。overwriteWeight > 0 时同时更新计划的 weight 字段（覆盖今日计划时用）。
+func UpdatePlanContent(ctx context.Context, planID bson.ObjectID, meals []Meal, exercises []Exercise, summary *DailySummary, overwriteWeight float64) error {
 	coll, err := planColl()
 	if err != nil {
 		return err
 	}
 
-	_, err = coll.UpdateByID(ctx, planID, bson.M{
-		"$set": bson.M{
-			"meals":         meals,
-			"exercises":     exercises,
-			"daily_summary": summary,
-			"status":        PlanStatusReady,
-			"updated_at":    time.Now().UTC(),
-		},
-	})
+	setFields := bson.M{
+		"meals":         meals,
+		"exercises":     exercises,
+		"daily_summary": summary,
+		"status":        PlanStatusReady,
+		"updated_at":    time.Now().UTC(),
+	}
+	if overwriteWeight > 0 {
+		setFields["weight"] = overwriteWeight
+	}
+
+	_, err = coll.UpdateByID(ctx, planID, bson.M{"$set": setFields})
 	return err
 }
 

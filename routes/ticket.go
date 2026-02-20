@@ -362,15 +362,19 @@ func TicketProfileRoutes(r gin.IRouter) {
 		weightHistory, _ := db.GetWeightHistory(c.Request.Context(), ticketID, 30)
 
 		c.JSON(http.StatusOK, gin.H{
-			"current_weight":        ticket.CurrentWeight,
-			"target_weight":          ticket.TargetWeight,
-			"weight_updated_at":      ticket.WeightUpdatedAt,
-			"weight_history":         weightHistory,
-			"reminder_hour":          ticket.ReminderHour,
-			"reminder_minute":        ticket.ReminderMinute,
-			"basic_info":             ticket.BasicInfo,
+			"current_weight":                   ticket.CurrentWeight,
+			"target_weight":                    ticket.TargetWeight,
+			"weight_updated_at":                ticket.WeightUpdatedAt,
+			"weight_history":                   weightHistory,
+			"reminder_hour":                    ticket.ReminderHour,
+			"reminder_minute":                  ticket.ReminderMinute,
+			"basic_info":                       ticket.BasicInfo,
 			"dietary_and_exercise_preferences": ticket.DietaryAndExercisePreferences,
-			"health_issues":          ticket.HealthIssues,
+			"health_issues":                    ticket.HealthIssues,
+			"work_type":                        ticket.WorkType,
+			"execution_constraints":            ticket.ExecutionConstraints,
+			"past_failure_experience":          ticket.PastFailureExperience,
+			"fitness_equipment":                ticket.FitnessEquipment,
 		})
 	})
 
@@ -381,6 +385,10 @@ func TicketProfileRoutes(r gin.IRouter) {
 			DietaryAndExercisePreferences *string  `json:"dietary_and_exercise_preferences,omitempty"`
 			HealthIssues                  *string  `json:"health_issues,omitempty"`
 			TargetWeight                  *float64 `json:"target_weight,omitempty"`
+			WorkType                      *string  `json:"work_type,omitempty"`
+			ExecutionConstraints          *string  `json:"execution_constraints,omitempty"`
+			PastFailureExperience         *string  `json:"past_failure_experience,omitempty"`
+			FitnessEquipment             *string  `json:"fitness_equipment,omitempty"`
 			ReminderHour                  *int     `json:"reminder_hour,omitempty"`
 			ReminderMinute                *int     `json:"reminder_minute,omitempty"`
 		}
@@ -392,8 +400,10 @@ func TicketProfileRoutes(r gin.IRouter) {
 		ticketID := c.GetString("ticket_id")
 
 		// 更新profile信息
-		if req.BasicInfo != nil || req.DietaryAndExercisePreferences != nil || req.HealthIssues != nil || req.TargetWeight != nil {
-			if err := db.UpdateTicketProfile(c.Request.Context(), ticketID, req.BasicInfo, req.DietaryAndExercisePreferences, req.HealthIssues, req.TargetWeight); err != nil {
+		if req.BasicInfo != nil || req.DietaryAndExercisePreferences != nil || req.HealthIssues != nil || req.TargetWeight != nil ||
+			req.WorkType != nil || req.ExecutionConstraints != nil || req.PastFailureExperience != nil || req.FitnessEquipment != nil {
+			if err := db.UpdateTicketProfile(c.Request.Context(), ticketID, req.BasicInfo, req.DietaryAndExercisePreferences, req.HealthIssues, req.TargetWeight,
+				req.WorkType, req.ExecutionConstraints, req.PastFailureExperience, req.FitnessEquipment); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
 			}
@@ -447,13 +457,17 @@ func TicketProfileRoutes(r gin.IRouter) {
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"message":                         "用户信息已更新",
-			"basic_info":                      ticket.BasicInfo,
+			"message":                          "用户信息已更新",
+			"basic_info":                       ticket.BasicInfo,
 			"dietary_and_exercise_preferences": ticket.DietaryAndExercisePreferences,
-			"health_issues":                   ticket.HealthIssues,
-			"target_weight":                   ticket.TargetWeight,
-			"reminder_hour":                   ticket.ReminderHour,
-			"reminder_minute":                 ticket.ReminderMinute,
+			"health_issues":                    ticket.HealthIssues,
+			"target_weight":                    ticket.TargetWeight,
+			"work_type":                        ticket.WorkType,
+			"execution_constraints":            ticket.ExecutionConstraints,
+			"past_failure_experience":          ticket.PastFailureExperience,
+			"fitness_equipment":                ticket.FitnessEquipment,
+			"reminder_hour":                    ticket.ReminderHour,
+			"reminder_minute":                  ticket.ReminderMinute,
 		})
 	})
 }

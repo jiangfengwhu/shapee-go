@@ -8,6 +8,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 const (
@@ -16,10 +17,10 @@ const (
 )
 
 var (
-	ErrTicketNotFound          = errors.New("ticket not found")
-	ErrInvalidTicketID         = errors.New("invalid ticket id")
-	ErrClientNotInitialized    = errors.New("client not initialized")
-	ErrSubscriptionExpired     = errors.New("subscription expired")
+	ErrTicketNotFound           = errors.New("ticket not found")
+	ErrInvalidTicketID          = errors.New("invalid ticket id")
+	ErrClientNotInitialized     = errors.New("client not initialized")
+	ErrSubscriptionExpired      = errors.New("subscription expired")
 	ErrWeightUpdateLimitReached = errors.New("一天最多只能更新一次体重")
 )
 
@@ -35,20 +36,24 @@ type WeightRecord struct {
 }
 
 type Ticket struct {
-	ID              bson.ObjectID `bson:"_id"`
-	DeviceID        string        `bson:"device_id,omitempty" json:"device_id,omitempty"`
-	DeviceToken     string        `bson:"device_token,omitempty" json:"device_token,omitempty"`
-	CurrentWeight   float64       `bson:"current_weight,omitempty" json:"current_weight,omitempty"`
-	TargetWeight    float64       `bson:"target_weight,omitempty" json:"target_weight,omitempty"` // 目标体重
-	WeightUpdatedAt *time.Time    `bson:"weight_updated_at,omitempty" json:"weight_updated_at,omitempty"`
+	ID              bson.ObjectID  `bson:"_id"`
+	DeviceID        string         `bson:"device_id,omitempty" json:"device_id,omitempty"`
+	DeviceToken     string         `bson:"device_token,omitempty" json:"device_token,omitempty"`
+	CurrentWeight   float64        `bson:"current_weight,omitempty" json:"current_weight,omitempty"`
+	TargetWeight    float64        `bson:"target_weight,omitempty" json:"target_weight,omitempty"` // 目标体重
+	WeightUpdatedAt *time.Time     `bson:"weight_updated_at,omitempty" json:"weight_updated_at,omitempty"`
 	WeightHistory   []WeightRecord `bson:"weight_history,omitempty" json:"weight_history,omitempty"`
-	ReminderHour    int           `bson:"reminder_hour" json:"reminder_hour"`
-	ReminderMinute  int           `bson:"reminder_minute" json:"reminder_minute"`
+	ReminderHour    int            `bson:"reminder_hour" json:"reminder_hour"`
+	ReminderMinute  int            `bson:"reminder_minute" json:"reminder_minute"`
 
 	// 用户profile信息
-	BasicInfo                      string `bson:"basic_info,omitempty" json:"basic_info,omitempty"`                                           // 基础信息
-	DietaryAndExercisePreferences  string `bson:"dietary_and_exercise_preferences,omitempty" json:"dietary_and_exercise_preferences,omitempty"` // 饮食及运动喜好
-	HealthIssues                   string `bson:"health_issues,omitempty" json:"health_issues,omitempty"`                                       // 健康问题
+	BasicInfo                     string `bson:"basic_info,omitempty" json:"basic_info,omitempty"`                                             // 基础信息
+	DietaryAndExercisePreferences string `bson:"dietary_and_exercise_preferences,omitempty" json:"dietary_and_exercise_preferences,omitempty"` // 饮食及运动喜好
+	HealthIssues                  string `bson:"health_issues,omitempty" json:"health_issues,omitempty"`                                       // 健康问题
+	WorkType                      string `bson:"work_type,omitempty" json:"work_type,omitempty"`                                               // 工作类型
+	ExecutionConstraints          string `bson:"execution_constraints,omitempty" json:"execution_constraints,omitempty"`                       // 备餐和锻炼时长限制
+	PastFailureExperience         string `bson:"past_failure_experience,omitempty" json:"past_failure_experience,omitempty"`                   // 过往减肥失败经历
+	FitnessEquipment              string `bson:"fitness_equipment,omitempty" json:"fitness_equipment,omitempty"`                                 // 用户已有的健身器械
 
 	SubscriptionProductID             string     `bson:"subscription_product_id,omitempty" json:"subscription_product_id,omitempty"`
 	SubscriptionExpiry                *time.Time `bson:"subscription_expiry,omitempty" json:"subscription_expiry,omitempty"`
@@ -197,7 +202,7 @@ func ExpireSubscription(ctx context.Context, ticketID bson.ObjectID) error {
 	update := bson.M{
 		"$set": bson.M{
 			"subscription_expiry": now,
-			"updated_at":         now,
+			"updated_at":          now,
 		},
 	}
 
@@ -422,7 +427,6 @@ func FindPendingAppleTransactions(ctx context.Context) ([]*AppleIAPTransaction, 
 	return transactions, nil
 }
 
-
 // MarkTransactionRefunded marks an Apple IAP transaction as refunded
 func MarkTransactionRefunded(ctx context.Context, transactionID string) error {
 	if client == nil {
@@ -470,7 +474,8 @@ func UpdateTicketDeviceToken(ctx context.Context, idHex, deviceToken string) err
 
 func UpdateTicketWeight(ctx context.Context, idHex string, weight float64) (*Ticket, error) {
 	// UpdateTicketWeight now uses AddWeightRecord which handles both weight_history and current_weight
-	_, err := AddWeightRecord(ctx, idHex, weight)
+	// 此处不传 allowMultiplePerDay，保持“一天一次”的默认限制
+	_, err := AddWeightRecord(ctx, idHex, weight, false)
 	if err != nil {
 		return nil, err
 	}
@@ -527,7 +532,7 @@ func UpdateTicketReminderTime(ctx context.Context, idHex string, hour, minute in
 }
 
 // UpdateTicketProfile updates user profile information
-func UpdateTicketProfile(ctx context.Context, idHex string, basicInfo, dietaryAndExercisePreferences, healthIssues *string, targetWeight *float64) error {
+func UpdateTicketProfile(ctx context.Context, idHex string, basicInfo, dietaryAndExercisePreferences, healthIssues *string, targetWeight *float64, workType, executionConstraints, pastFailureExperience, fitnessEquipment *string) error {
 	oid, err := bson.ObjectIDFromHex(idHex)
 	if err != nil {
 		return ErrInvalidTicketID
@@ -554,6 +559,18 @@ func UpdateTicketProfile(ctx context.Context, idHex string, basicInfo, dietaryAn
 	if targetWeight != nil {
 		updateFields["target_weight"] = *targetWeight
 	}
+	if workType != nil {
+		updateFields["work_type"] = *workType
+	}
+	if executionConstraints != nil {
+		updateFields["execution_constraints"] = *executionConstraints
+	}
+	if pastFailureExperience != nil {
+		updateFields["past_failure_experience"] = *pastFailureExperience
+	}
+	if fitnessEquipment != nil {
+		updateFields["fitness_equipment"] = *fitnessEquipment
+	}
 
 	result, err := coll.UpdateByID(ctx, oid, bson.M{
 		"$set": updateFields,
@@ -569,9 +586,9 @@ func UpdateTicketProfile(ctx context.Context, idHex string, basicInfo, dietaryAn
 
 // --- Weight History (stored in Ticket) ---
 
-// AddWeightRecord adds a weight record to the ticket's weight_history array
-// 限制：一天最多只能更新一次体重
-func AddWeightRecord(ctx context.Context, ticketIDHex string, weight float64) (*WeightRecord, error) {
+// AddWeightRecord adds a weight record to the ticket's weight_history array.
+// 当 allowMultiplePerDay 为 false 时，一天最多只能更新一次体重；为 true 时（开发测试用）不限制。
+func AddWeightRecord(ctx context.Context, ticketIDHex string, weight float64, allowMultiplePerDay bool) (*WeightRecord, error) {
 	oid, err := bson.ObjectIDFromHex(ticketIDHex)
 	if err != nil {
 		return nil, ErrInvalidTicketID
@@ -594,10 +611,10 @@ func AddWeightRecord(ctx context.Context, ticketIDHex string, weight float64) (*
 
 	today := getTodayDateString()
 	now := time.Now().UTC()
+	loc, _ := time.LoadLocation("Asia/Shanghai")
 
-	// 检查今天是否已经更新过体重（通过 WeightUpdatedAt 判断）
-	if ticket.WeightUpdatedAt != nil {
-		loc, _ := time.LoadLocation("Asia/Shanghai")
+	// 检查今天是否已经更新过体重（通过 WeightUpdatedAt 判断）；开发测试可配置允许一天多次更新
+	if !allowMultiplePerDay && ticket.WeightUpdatedAt != nil {
 		updatedDate := ticket.WeightUpdatedAt.In(loc).Format("2006-01-02")
 		if updatedDate == today {
 			return nil, ErrWeightUpdateLimitReached
@@ -617,19 +634,38 @@ func AddWeightRecord(ctx context.Context, ticketIDHex string, weight float64) (*
 		"updated_at":        now,
 	}
 
-	// 添加新记录（插入到数组开头，最新的在前面）并更新计数
-	result, err := coll.UpdateOne(ctx,
-		bson.M{"_id": oid},
-		bson.M{
-			"$push": bson.M{
-				"weight_history": bson.M{
-					"$each":     []WeightRecord{record},
-					"$position": 0, // 插入到数组开头
+	// 允许一天多次更新且今天已有记录时：替换 weight_history 中当天的记录，否则插入新记录
+	isReplaceToday := allowMultiplePerDay && ticket.WeightUpdatedAt != nil &&
+		ticket.WeightUpdatedAt.In(loc).Format("2006-01-02") == today
+
+	var result *mongo.UpdateResult
+	if isReplaceToday {
+		result, err = coll.UpdateOne(ctx,
+			bson.M{"_id": oid, "weight_history.date": today},
+			bson.M{
+				"$set": bson.M{
+					"current_weight":         weight,
+					"weight_updated_at":      now,
+					"updated_at":             now,
+					"weight_history.$[elem]": record,
 				},
 			},
-			"$set": updateFields,
-		},
-	)
+			options.UpdateOne().SetArrayFilters([]any{bson.M{"elem.date": today}}),
+		)
+	} else {
+		result, err = coll.UpdateOne(ctx,
+			bson.M{"_id": oid},
+			bson.M{
+				"$push": bson.M{
+					"weight_history": bson.M{
+						"$each":     []WeightRecord{record},
+						"$position": 0,
+					},
+				},
+				"$set": updateFields,
+			},
+		)
+	}
 	if err != nil {
 		return nil, err
 	}

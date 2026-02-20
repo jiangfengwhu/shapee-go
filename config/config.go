@@ -42,6 +42,9 @@ type Config struct {
 		Products map[string]bool `json:"products"`
 	} `json:"apple_iap"`
 	Provider string `json:"provider"`
+
+	// AllowMultipleWeightUpdatesPerDay 为 true 时允许同一天多次更新体重，便于开发测试；生产环境建议为 false
+	AllowMultipleWeightUpdatesPerDay bool `json:"allow_multiple_weight_updates_per_day"`
 }
 
 func Load(filename string) (*Config, error) {

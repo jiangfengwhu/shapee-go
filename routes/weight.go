@@ -24,7 +24,7 @@ func WeightRoutes(r gin.IRouter, cfg *config.Config) {
 
 		ticketID := c.GetString("ticket_id")
 
-		record, err := db.AddWeightRecord(c.Request.Context(), ticketID, req.Weight)
+		record, err := db.AddWeightRecord(c.Request.Context(), ticketID, req.Weight, cfg.AllowMultipleWeightUpdatesPerDay)
 		if err != nil {
 			if err == db.ErrWeightUpdateLimitReached {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "一天最多只能更新一次体重"})
@@ -42,10 +42,11 @@ func WeightRoutes(r gin.IRouter, cfg *config.Config) {
 		}
 
 		// 使用独立的 context，避免请求完成后 context 被取消
+		targetWeight := ticket.TargetWeight
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
-			services.GenerateDailyPlan(ctx, cfg, ticketID, req.Weight)
+			services.GenerateDailyPlan(ctx, cfg, ticketID, req.Weight, targetWeight)
 		}()
 
 		c.JSON(http.StatusOK, gin.H{

@@ -14,18 +14,22 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-const plannerPrompt = `你是一位专业的减肥营养师和健身教练。请根据用户的当前体重，为其制定今天的个性化饮食和锻炼计划。
+const plannerPromptHead = `角色设定：
+请你扮演一位拥有十年以上经验的资深注册营养师（RD）和国际认证私人教练（ACE/ACSM）。你需要以科学、健康、不反弹为核心原则，结合运动医学和营养学知识，为我定制一份专属的减脂计划。
 
-用户当前体重：%.1f kg
+我的核心目标：
+我目前的体重是：%.1f kg，%s，请帮我在安全健康的前提下，规划一个合理的减重周期和阶段性目标。
+
+我的基础信息及偏好：
+%s
 
 制定规则：
-1. 三餐饮食计划必须科学合理，总热量控制在适合减肥的范围内
-2. 体重越大，基础代谢越高，热量缺口要合理（每日亏空300-500卡为宜）
-3. 体重>90kg：运动以低冲击为主（快走、游泳、椭圆机），避免跑步等高冲击运动
-4. 体重70-90kg：可适当加入慢跑、骑行等中等冲击运动
-5. 体重<70kg：可进行各类运动，包括HIIT
-6. 所有推荐的食物和运动都要具体、可执行，使用中国常见食材
-7. 锻炼安排1-2次，时间合理`
+1. 估算我的 BMI、基础代谢率（BMR）和每日总能量消耗（TDEE），评估我的目标体重是否合理，并科学预测达成该目标大概需要几个月
+2. 饮食方案（七分吃）： 设定每日热量摄入目标和缺口，给出宏量营养素（碳水、蛋白质、脂肪）的科学配比。请结合我的饮食偏好。
+3. 运动方案（三分练）： 结合我的运动偏好、已有健身器械、时间和健康状态（避开可能导致损伤的动作），运动总时长不能超过我规定的锻炼时长（如果有）。
+4. 日常干预与避坑指南： 针对我的作息或健康状态，给出睡眠、饮水量等生活方式建议，并列出 1-3 条减脂期最容易踩的坑。
+5. 语气： 专业、严谨但充满鼓励，像一位现实中真正关心我健康的教练。
+`
 
 var planResponseSchema = map[string]interface{}{
 	"type": "object",
@@ -79,12 +83,14 @@ var planResponseSchema = map[string]interface{}{
 		"daily_summary": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"target_calories_intake": map[string]interface{}{"type": "integer", "description": "目标摄入热量(卡)"},
-				"target_calories_burn":   map[string]interface{}{"type": "integer", "description": "目标消耗热量(卡)"},
-				"water_intake_ml":        map[string]interface{}{"type": "integer", "description": "建议饮水量(ml)"},
-				"tips":                   map[string]interface{}{"type": "string", "description": "今日总结建议"},
+				"target_calories_intake":  map[string]interface{}{"type": "integer", "description": "目标摄入热量(卡)"},
+				"target_calories_burn":    map[string]interface{}{"type": "integer", "description": "目标消耗热量(卡)"},
+				"water_intake_ml":         map[string]interface{}{"type": "integer", "description": "建议饮水量(ml)"},
+				"target_steps":            map[string]interface{}{"type": "integer", "description": "建议今日步数"},
+				"estimated_weeks_to_goal": map[string]interface{}{"type": "integer", "description": "预计多少周可达目标体重，未设目标时为0"},
+				"tips":                    map[string]interface{}{"type": "string", "description": "今日总结建议，换行隔开"},
 			},
-			"required":             []string{"target_calories_intake", "target_calories_burn", "water_intake_ml", "tips"},
+			"required":             []string{"target_calories_intake", "target_calories_burn", "water_intake_ml", "target_steps", "estimated_weeks_to_goal", "tips"},
 			"additionalProperties": false,
 		},
 	},
@@ -98,18 +104,112 @@ type LLMPlanResponse struct {
 	DailySummary *db.DailySummary `json:"daily_summary"`
 }
 
+// buildPlanContext 组装用户基础信息、近三日计划与体重趋势，用于生成更个性化的计划
+func buildPlanContext(ctx context.Context, ticketIDHex string) string {
+	var b strings.Builder
+
+	ticket, err := db.GetTicket(ctx, ticketIDHex)
+	if err != nil || ticket == nil {
+		return ""
+	}
+
+	// 用户基础信息与偏好
+	if ticket.BasicInfo != "" {
+		b.WriteString("【我的基础信息】\n")
+		b.WriteString(ticket.BasicInfo)
+		b.WriteString("\n\n")
+	}
+	if ticket.DietaryAndExercisePreferences != "" {
+		b.WriteString("【饮食与运动偏好】\n")
+		b.WriteString(ticket.DietaryAndExercisePreferences)
+		b.WriteString("\n\n")
+	}
+	if ticket.HealthIssues != "" {
+		b.WriteString("【健康问题/注意事项】\n")
+		b.WriteString(ticket.HealthIssues)
+		b.WriteString("\n\n")
+	}
+	if ticket.WorkType != "" {
+		b.WriteString("【工作类型】\n")
+		b.WriteString(ticket.WorkType)
+		b.WriteString("\n\n")
+	}
+	if ticket.ExecutionConstraints != "" {
+		b.WriteString("【备餐与锻炼时长限制】\n")
+		b.WriteString(ticket.ExecutionConstraints)
+		b.WriteString("\n\n")
+	}
+	if ticket.PastFailureExperience != "" {
+		b.WriteString("【过往减肥失败经历】\n")
+		b.WriteString(ticket.PastFailureExperience)
+		b.WriteString("\n\n")
+	}
+	if ticket.FitnessEquipment != "" {
+		b.WriteString("【已有健身器械】\n")
+		b.WriteString(ticket.FitnessEquipment)
+		b.WriteString("\n\n")
+	}
+
+	// 近七日计划（仅已就绪的，供参考以保持连贯或避免重复）
+	recentPlans, _ := db.GetRecentPlans(ctx, ticketIDHex, 7)
+	if len(recentPlans) > 0 {
+		b.WriteString("【近七日计划摘要（供参考，请在此基础上优化今日计划）】\n")
+		for _, p := range recentPlans {
+			b.WriteString(fmt.Sprintf("- %s（体重 %.1f kg）", p.Date, p.Weight))
+			if p.DailySummary != nil {
+				b.WriteString(fmt.Sprintf("：摄入目标 %d 卡，步数 %d", p.DailySummary.TargetCaloriesIntake, p.DailySummary.TargetSteps))
+			}
+			b.WriteString("\n")
+			for _, m := range p.Meals {
+				b.WriteString(fmt.Sprintf("  %s %s %s %d卡\n", m.Type, m.Time, m.Title, m.TotalCalories))
+			}
+			for _, e := range p.Exercises {
+				b.WriteString(fmt.Sprintf("  运动 %s %s %d分钟 %d卡\n", e.Title, e.Time, e.DurationMinutes, e.CaloriesBurn))
+			}
+		}
+		b.WriteString("\n")
+	}
+
+	// 近期体重变化趋势（最多取最近 7 条，weight_history 已按时间倒序）
+	const weightTrendLimit = 7
+	if len(ticket.WeightHistory) > 0 {
+		b.WriteString("【近期体重变化趋势】\n")
+		n := weightTrendLimit
+		if n > len(ticket.WeightHistory) {
+			n = len(ticket.WeightHistory)
+		}
+		for i := 0; i < n; i++ {
+			r := ticket.WeightHistory[i]
+			b.WriteString(fmt.Sprintf("%s %.1f kg", r.Date, r.Weight))
+			if i < n-1 {
+				b.WriteString(" → ")
+			}
+		}
+		b.WriteString("\n\n")
+	}
+
+	return b.String()
+}
+
 // GenerateDailyPlan 为用户生成每日计划（后台异步调用）
-func GenerateDailyPlan(ctx context.Context, cfg *config.Config, ticketIDHex string, weight float64) {
+// targetWeight 为用户目标体重(kg)，未设置时传 0
+func GenerateDailyPlan(ctx context.Context, cfg *config.Config, ticketIDHex string, weight, targetWeight float64) {
 	plan, err := db.CreateDailyPlan(ctx, ticketIDHex, weight)
 	if err != nil {
 		log.Printf("[Planner] 创建计划失败 ticket=%s: %v", ticketIDHex, err)
 		return
 	}
 
-	// 如果计划已经存在且不是pending状态，跳过
+	// 如果计划已经存在且不是 pending 状态，默认跳过；开发测试开启「一天多次更新体重」时则直接覆盖
+	overwriteWeight := 0.0
 	if plan.Status != db.PlanStatusPending {
-		log.Printf("[Planner] 今日计划已存在 ticket=%s status=%s", ticketIDHex, plan.Status)
-		return
+		if cfg.AllowMultipleWeightUpdatesPerDay {
+			log.Printf("[Planner] 今日计划已存在，直接覆盖 ticket=%s status=%s", ticketIDHex, plan.Status)
+			overwriteWeight = weight
+		} else {
+			log.Printf("[Planner] 今日计划已存在 ticket=%s status=%s", ticketIDHex, plan.Status)
+			return
+		}
 	}
 
 	if err := db.UpdatePlanStatus(ctx, plan.ID, db.PlanStatusGenerating, ""); err != nil {
@@ -117,7 +217,13 @@ func GenerateDailyPlan(ctx context.Context, cfg *config.Config, ticketIDHex stri
 		return
 	}
 
-	prompt := fmt.Sprintf(plannerPrompt, weight)
+	targetLine := ""
+	if targetWeight > 0 {
+		targetLine = fmt.Sprintf("我的目标体重是：%.1f kg\n", targetWeight)
+	}
+
+	contextBlock := buildPlanContext(ctx, ticketIDHex)
+	prompt := fmt.Sprintf(plannerPromptHead, weight, targetLine, contextBlock)
 
 	response, err := llm.GenerateJSON(ctx, llm.ChatConfig{
 		Provider:       cfg.Provider,
@@ -141,7 +247,7 @@ func GenerateDailyPlan(ctx context.Context, cfg *config.Config, ticketIDHex stri
 		return
 	}
 
-	if err := db.UpdatePlanContent(ctx, plan.ID, planData.Meals, planData.Exercises, planData.DailySummary); err != nil {
+	if err := db.UpdatePlanContent(ctx, plan.ID, planData.Meals, planData.Exercises, planData.DailySummary, overwriteWeight); err != nil {
 		log.Printf("[Planner] 保存计划失败 ticket=%s: %v", ticketIDHex, err)
 		db.UpdatePlanStatus(ctx, plan.ID, db.PlanStatusFailed, err.Error())
 		return

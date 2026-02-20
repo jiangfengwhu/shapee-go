@@ -22,7 +22,9 @@ func testPlannerWithProvider(t *testing.T, provider string) {
 	defer cancel()
 
 	weight := 82.5
-	prompt := fmt.Sprintf(plannerPrompt, weight)
+	targetLine := ""
+	contextBlock := "" // 单测无 DB，不注入用户信息与近期计划
+	prompt := fmt.Sprintf(plannerPromptHead, weight, targetLine, contextBlock)
 
 	response, err := llm.GenerateJSON(ctx, llm.ChatConfig{
 		Provider:       provider,
@@ -97,6 +99,12 @@ func testPlannerWithProvider(t *testing.T, provider string) {
 	}
 	if plan.DailySummary.WaterIntakeML <= 0 {
 		t.Errorf("饮水量应大于0，实际 %d", plan.DailySummary.WaterIntakeML)
+	}
+	if plan.DailySummary.TargetSteps <= 0 {
+		t.Errorf("建议步数应大于0，实际 %d", plan.DailySummary.TargetSteps)
+	}
+	if plan.DailySummary.EstimatedWeeksToGoal < 0 {
+		t.Errorf("预计达成目标周数不应为负，实际 %d", plan.DailySummary.EstimatedWeeksToGoal)
 	}
 
 	pretty, _ := json.MarshalIndent(plan, "", "  ")
